@@ -30,5 +30,6 @@ int readSocket(SOCKET s, char* buf, int len);
 /* Alloc Console to Show DEBUG messages */
 void debugInit();
 void debug(const char* message);
+void hexDump(const char* desc, const char* addr, int len);
 
 #endif /* _COMMON_H_ */
