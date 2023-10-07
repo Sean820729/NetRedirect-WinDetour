@@ -19,6 +19,14 @@ static string roSendBuf("");	// Data to send to the RO client
 static string xkoreSendBuf("");	// Data to send to the X-Kore server
 bool imalive = false;
 
+uintptr_t base;
+struct _Target {
+    typedef void(__thiscall* _EncryptPacket)(uintptr_t* pThis, int len, char* buffer);
+    _EncryptPacket EncryptPacket;
+
+    uintptr_t* pThis;
+}Target;
+
 void init();
 void finish();
 void HookWs2Functions();
@@ -39,7 +47,7 @@ extern "C" {
     int (WINAPI* OriginalWSAAsyncSelect) (SOCKET s, HWND hWnd, unsigned int wMsg, long lEvent) = WSAAsyncSelect;
 }
 
-void sendDataToKore(char* buffer, int len, e_PacketType type) {
+static void sendDataToKore(char* buffer, int len, e_PacketType type) {
     // Is Kore running?
     bool isAlive = koreClientIsAlive;
 
@@ -55,6 +63,11 @@ void sendDataToKore(char* buffer, int len, e_PacketType type) {
         }
         memcpy(newbuf + 1, &sLen, 2);
         memcpy(newbuf + 3, buffer, len);
+
+        // if (type == e_PacketType::RECEIVED) {
+        //     hexDump("recv", newbuf + 3, len);
+        // }
+
         xkoreSendBuf.append(newbuf, len + 3);
         free(newbuf);
     }
@@ -63,7 +76,9 @@ void sendDataToKore(char* buffer, int len, e_PacketType type) {
 //  int (WINAPI* OriginalRecv)
 int WINAPI HookedRecv(SOCKET socket, char* buffer, int len, int flags) {
     debug("Called MyRecv ...");
+
     int ret_len = OriginalRecv(socket, buffer, len, flags);
+    // hexDump("recv", buffer, ret_len);
 
     if (ret_len != SOCKET_ERROR && ret_len > 0) {
         roServer = socket;
@@ -81,26 +96,28 @@ int WINAPI HookedRecvFrom(SOCKET s, char* buf, int len, int flags, struct sockad
 
 // int (WINAPI* OriginalSend)
 int WINAPI HookedSend(SOCKET s, const char* buffer, int len, int flags) {
-    debug("Called MySend ...");
+    // debug("Called MySend ...");
     int ret;
 
     // See if the socket to the RO server is still alive, and make
     // sure WSAGetLastError() returns the right error if something's wrong
     ret = OriginalSend(s, buffer, 0, flags);
 
+    // hexDump("send", buffer, len);
+
     if (ret != SOCKET_ERROR && len > 0) {
         bool isAlive = koreClientIsAlive;
-        if (isAlive) {
-            roServer = s;
-            sendDataToKore((char*)buffer, len, e_PacketType::SENDED);
-            return len;
-
-        }
-        else {
+        // if (isAlive) {
+        //     roServer = s;
+        //     sendDataToKore((char*)buffer, len, e_PacketType::SENDED);
+        //     return len;
+        // 
+        // }
+        // else {
             // Send packet directly to the RO server
             ret = OriginalSend(s, buffer, len, flags);
             return ret;
-        }
+        //}
     }
     else
         return ret;
@@ -165,8 +182,14 @@ processPacket(Packet* packet)
         roSendBuf.append(packet->data, packet->len);
         break;
 
+    case 'O': // Send a packet to the RO server
+        debug("[Manual] Sending Data From Openkore to Server...");
+        if (roServer != INVALID_SOCKET && isConnected(roServer))
+            Target.EncryptPacket(Target.pThis, packet->len, packet->data);
+        break;
+
     case 'K': default: // Keep-alive
-        debug("Received Keep-Alive Packet...");
+        // debug("Received Keep-Alive Packet...");
         break;
     }
 }
@@ -186,6 +209,12 @@ void koreConnectionMain()
 
     memcpy(pingPacket, "K", 1);
     memcpy(pingPacket + 1, &pingPacketLength, 2);
+
+    base = (uintptr_t)GetModuleHandle(L"Ragexe.exe");
+    // Target.EncryptPacket = (_Target::_EncryptPacket)(base + 0x4CADD0);
+    // Target.pThis = (uintptr_t*)(0x1169220);
+    Target.EncryptPacket = (_Target::_EncryptPacket)(base + 0x4CE150);
+    Target.pThis = (uintptr_t*)(0x116D298);
 
     while (keepMainThread) {
         bool isAlive = koreClientIsAlive;
@@ -235,10 +264,18 @@ void koreConnectionMain()
                 // Data available
                 Packet* packet;
                 int next = 0;
-                debug("Received Packet from OpenKore...");
+                // debug("Received Packet from OpenKore...");
                 koreClientRecvBuf.append(buf, ret);
                 while ((packet = unpackPacket(koreClientRecvBuf.c_str(), koreClientRecvBuf.size(), next))) {
                     // Packet is complete
+                    // hexDump("openkore to server", packet->data, packet->len);
+
+                    // printf("Value:  %x\n", *Target.EncryptPacket);
+                    // printf("Address of value: %p\n", (void*)Target.EncryptPacket);
+                    // 
+                    // printf("Value:  %x\n", *Target.pThis);
+                    // printf("Address of value: %p\n", (void*)Target.pThis);
+
                     processPacket(packet);
                     free(packet);
                     koreClientRecvBuf.erase(0, next);
@@ -265,6 +302,7 @@ void koreConnectionMain()
                 // if this packet is supposed to go to the RO server ('S')
                 // Ignore packets that are meant for Kore ('R')
                 while ((packet = unpackPacket(xkoreSendBuf.c_str(), xkoreSendBuf.size(), next))) {
+                    // hexDump("dll to server if client is dead", packet->data, packet->len);
                     if (packet->ID == 'S')
                         OriginalSend(roServer, (char*)packet->data, packet->len, 0);
                     free(packet);
